@@ -1,0 +1,186 @@
+---
+title: "Data 2023 - Exploratory Analysis"
+execute-dir: "Data_processing"
+output-file: "data_processing.html"
+---
+
+Last update: `r Sys.Date()`
+
+```{r}
+#| code-summary: Settings
+library(tidyverse)
+library(patchwork)
+library(ggnewscale)
+library(wCorr)
+theme_set(theme_bw())
+files=list.files("Data_processing/Count_table","counts_ampliconseq2023_.-..tsv", full.names = T)
+clrs=ghibli::ghibli_palette("PonyoMedium")[c(3,4,6,2,5,7,1)]
+clrs2=ghibli::ghibli_palette("PonyoLight")[c(3,4,6,2,5,7,1)]
+```
+
+## Pre-analysis
+
+### Quality Control
+
+-   2 Replicates (1 and 3), sequenced separately.
+
+-   6 samples each (Gates 2 to 7)
+
+-   Ordered 25M reads per sample
+
+```{r}
+QC=readODS::read_ods("Summary/QC_summary.ods", .name_repair = "universal")%>%filter(!is.na(id))
+data.table::data.table(QC)
+```
+
+```{r}
+#| label: fig-0
+#| fig-cap: Number of total reads and mean Phred scores (quality) for each sample, FW (R1) and RV (R2). 
+QC$Sample=QC$Sample%>%str_remove("Library  .  Gate-")
+QC$rep=QC$Sample%>%str_remove(".-")%>%as_factor()
+QC%>%pivot_longer(c(Number_of_reads,Phred_score ), values_to = "val", names_to = "var")%>%ggplot(aes(Sample, val, fill=Read_orientation, linetype=rep))+geom_col(position = "dodge", col=clrs[4])+scale_fill_manual(values=clrs[c(3,5)])+facet_wrap(~var,scales = "free_y")
+```
+
+```{r}
+#| label: fig-01
+#| fig-cap: Distribution of the quality of reads for each sample, in both read orientation. Q.10=Q<10, Q.10.20= 10>Q>20, Q.20.30 = 20>Q>30, Q.30=Q>30.
+QC%>%pivot_longer(starts_with("Q"), values_to = "N", names_to = "quality")%>%
+  ggplot(aes(Sample, N, fill=quality))+geom_col()+scale_fill_viridis_d()+facet_grid(~Read_orientation)
+
+```
+
+```{r}
+nreads_qc=QC%>%group_by(Sample)%>%summarise(FASTQ=sum(Number_of_reads)/2)
+
+```
+
+### Trimming
+
+1- Create list of sample IDs, save in tmp.txt
+
+```{bash}
+#| eval: false
+#| code-summary: create_input.sh
+
+for Gate in 1 2 3 4 5 6
+do
+	for Lib in 1 2
+	do
+		echo ${Gate}-${Lib} >> tmp.txt
+	done
+done
+```
+
+2- Change the name of the FASTQ files
+
+```{bash}
+#| eval: false
+#| code-summary: rename.sh
+
+for filename in FASTQ/*.fastq.gz
+do 
+	mv "./$filename" "./$(echo "$filename" | sed -e 's/Library_._//g')"
+done
+```
+
+For the next steps, the script were run in 12 parallel cores with
+
+```{bash}
+#| eval: false
+#| code-summary: parallel
+
+parallel -j12 source scripts/filename.sh :::: tmp.txt
+
+```
+
+3- Trim primers with *cutadapt*. Discard those reads lacking the primer. Then trim poly G tail with FASTP, along with quality trimming
+
+```{bash}
+#| eval: false
+#| code-summary: trimming.sh
+fastq1="FASTQ/Gate-$1_R1.fastq.gz"
+fastq2="FASTQ/Gate-$1_R2.fastq.gz"
+temp1="Trimming/TEMP_trimmed_fastq_$1_R1.fastq"
+temp2="Trimming/TEMP_trimmed_fastq_$1_R2.fastq"
+trimmed1="Trimming/trimmed_fastq_$1_R1.fastq"
+trimmed2="Trimming/trimmed_fastq_$1_R2.fastq"
+cutadapt_summary="Summary/cutadapt_fastq_$1.txt"
+fastp_summary="Summary/fastp_fastq_$1.txt"
+html_fastp="Summary/fastp_report_$1.html"
+cutadapt -g  file:pcr_primers.fa -G file:pcr_primers.fa --discard-untrimmed -o $temp1 -p $temp2 $fastq1 $fastq2 > $cutadapt_summary
+echo "Cutadapt trimming done"
+fastp -i $temp1 -I $temp2 -o $trimmed1 -O $trimmed2 -q 20 --disable_adapter_trimming --cut_right --cut_right_window_size 3 --cut_right_mean_quality 20 --trim_poly_g poly_g_min_len 3 --dont_eval_duplication --html $html_fastp > $fastp_summary
+echo "FASTP trimming done"
+rm $temp1
+rm $temp2
+gzip $trimmed1
+gzip $trimmed2
+```
+
+### Alignment
+
+4- Build an index for the library FASTA
+
+```{bash}
+#| eval: false
+#| code-summary: build-lib-index
+hisat2-build ../Library_data/data/promoter_wo_dupl_SpikeIns.fa library_index/library_idx
+```
+
+5- Align reads with *Hisat2.* Ignore the discordant matches. Only fragments with lengths between 230 and 270pb (`-I 230 -X 270`) (they should be exactly of 250pb, excepting the spikes, that range in 245-255). Convert the sam file to bam, excluding secondary reads (`-F 256`)
+
+```{bash}
+#| eval: false
+#| code-summary: alignment.sh
+#corregir los tar
+trimmed1="Trimming/trimmed_fastq_$1_R1.fastq.gz"
+trimmed2="Trimming/trimmed_fastq_$1_R2.fastq.gz"
+sam_file="Alignment/alignment_$1.sam"
+sam_summary_file="Summary/alignment_summary_$1.sam"
+bam_file="Alignment/alignment_$1.bam"
+hisat2 --no-spliced-alignment -I 230 -X 270 --no-discordant -x library_index/library_idx -1 $trimmed1 -2 $trimmed2 -S $sam_file --summary-file $sam_summary_file
+samtools view -b -F 256 $sam_file > $bam_file
+```
+
+### From reads to counts
+
+6- Sort the bam files and index.
+
+```{bash}
+#| eval: false
+#| code-summary: bam_process.sh
+
+bam_file="Alignment/alignment_$1.bam"
+sorted_file="Alignment/alignment_sorted_$1.bam"
+samtools sort -o $sorted_file $bam_file
+rm $bam_file
+samtools index $sorted_file
+```
+
+7- For each one of the sequence IDs, count the number of reads associated in the bam file.
+
+```{bash}
+#| eval: false
+#| code-summary: count_reads.sh
+
+bam_file="Alignment/bam/alignment_sorted_$1.bam"
+output="Count_table/counts_ampliconseq2023_$1.tsv"	
+for seq in $(cat seq_id.txt); do
+	num_reads=$(samtools view -c -f 2 $bam_file $seq)
+	echo -e "$seq\t$num_reads"
+	done > $output
+```
+
+```{r}
+#| label: fig-1
+#| fig-cap: Number of reads containing the adapters (total_reads) and the amount of those reads aligned properly, univocally and concordantly with its pair. Separated by sample and replicate. 
+#| eval: false
+alignment_summ=list.files("Data_2023/alignment_summary", full.names = T)
+samplename=str_remove(alignment_summ, "^.+alignment_summary_")%>%str_remove(".txt")
+total_reads=map(alignment_summ, ~readLines(.x)[1]%>%str_remove(" reads.+$")%>%as.numeric())%>%list_c()
+paired_alignment=map(alignment_summ, ~(readLines(.x)[4]%>%str_trim()%>%str_split("\\s"))[[1]][1]%>%as.numeric())%>%list_c()
+
+tmp=tibble(samplename, trimmed=total_reads, paired_alignment, rep=factor(str_remove(samplename, ".-")))%>%left_join(nreads_qc, by=c("samplename"="Sample"))%>%pivot_longer(where(is.numeric), names_to="data", values_to = "counts")
+tmp$data=factor(tmp$data, levels=c("FASTQ", "trimmed", "paired_alignment"),labels = c("FASTQ", "trimmed", "paired_alignment"))
+tmp%>%ggplot(aes(samplename,counts, fill=data))+geom_col(position = "dodge", col=clrs[4])+scale_fill_manual(values=clrs[c(3,5,2)])+xlab("Sample")
+```
