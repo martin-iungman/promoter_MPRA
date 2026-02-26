@@ -87,7 +87,7 @@ spikes%>%filter(spike%in%c("Spike-In 2"))%>%
 ggsave("Plots/Fig1/spike_in.pdf")
 
 # validation
-files=list.files(path="Experimental_data/Citometry/Stable_validation/Sample Group - 1/Tables/", pattern=".cells", full.names = T, recursive=T)
+files=list.files(path="Experimental_data/Stable_validation/", pattern=".cells", full.names = T, recursive=T)
 prom_name=files %>% str_remove("^.+Tables/(lvs-)?") %>% str_remove("_Data .+$") #otra opcion con str_match(files, "^.+Tables/(?:lvs-)?(.*?)(_Data .+$)")[,2]
 df=map2(files, prom_name, ~read_csv(.x, ) %>%
           mutate(sample_name=.y)) %>% list_rbind()
@@ -383,6 +383,7 @@ tidy_data=data %>% fastDummies::dummy_cols("TE_superclass", ignore_na = T, omit_
   
   mutate(across(c(where(~ is.numeric(.x)), -contains("mean"),-contains("var")), as.logical), rep=as.factor(rep), across(where(is.logical), ~.x%>% factor(level=c("TRUE","FALSE")))) %>% ungroup()
 tidy_data %>% write_tsv("Analysis/Tables/tidy_data.tsv")
+#add manually to tidy_names if feature corresponds to endo or seq
 tidy_names=read_tsv( "Analysis/Tables/tidy_names.tsv")
 n_features=tidy_data %>% select(-mean) %>% group_by(rep) %>% summarise(across(everything(), function(x)as.logical(x) %>% sum(na.rm=T) %>% magrittr::divide_by(n()))) %>% pivot_longer(-rep, names_to = "feature", values_to = "prop")
 vbles_split=map(c("seq","endo"), ~tidy_names$feature[(tidy_names$group==.x %>% na.exclude())&(tidy_names$feature%in%names(tidy_data))])
@@ -854,49 +855,43 @@ ggsave("Plots/Fig3/reporter_endo_max_fantom_boxplot.pdf", width = 9, height = 6.
 library(clusterProfiler)
 library(ReactomePA)
 library(org.Hs.eg.db)
+library(coin)
 hs <- org.Hs.eg.db
-# WARNING: HIGH TIME AND MEMORY DEMAND:
-# nr=vroom::vroom("Analysis/Tables/library_remap_NR.bed", 
-#                 col_names = c("seqnames", "start", "end", "seq_id", "score", "strand", "seqnames_peak", 
-#                               "start_peak",  "end_peak", "sample", "N_tissue", "strand_peak", "thickstart_peak", "thickend_peak", "rgb"))
-# nr=nr %>% separate(sample, into=c("TF", "sample"), sep=":")
-# nr_N=nr %>% group_split(TF) %>% 
-#   map(~tibble(TF=unique(.x$TF),N=nrow(.x))) %>% list_rbind()
-# 
-# TF_data=data
-# for(TFs in unique(nr$feature)){
-#   subdata=nr %>% filter(feature==TFs)
-#   if(any(subdata$seq_id%in%TF_data$seq_id)){
-#     TF_data[[paste0("TF_",TFs)]]=TF_data$seq_id%in%(subdata$seq_id)
-#   }}
-# rm(nr)
-# gc()
-# 
-# write_tsv(TF_data, "Analysis/Tables/data_TF_remap.tsv")
-TF_data=read_tsv("Analysis/Tables/data_TF_remap.tsv")
-nTF=TF_data %>% select(-TF_knownmotif) %>% group_by(rep) %>% summarise(across(starts_with("TF_"),sum))%>% 
-  pivot_longer(starts_with("TF_"), names_to = "feature",values_to = "counts") %>% 
-  filter(counts>100) %>% add_count(feature) %>% filter(n==2)
+bed=import.bed("External_data/remap2022_nr_macs2_hg38_v1_0.bed")
+bed_lib=plyranges::join_overlap_inner(bed, lib)
 
-tidy_TF_data=TF_data %>% dplyr::select(mean, mean_sw, var_rank_sw, rep, any_of(unique(nTF$feature))) %>% 
+clean_data= values(bed_lib) %>% as_tibble()  %>% mutate(TF=str_remove(name.x, "\\:.+$")) %>% 
+  select(name.y, TF) %>% 
+  filter(str_detect(name.y,"^FP.{6}_")) %>% 
+  unique()
+binary_df=clean_data %>% mutate(value=T) %>% pivot_wider(names_from = TF,values_from = value, values_fill = F)
+data_TF=data %>% select(seq_id, rep, mean, var_rank_sw, mean_sw) %>% 
+  left_join(binary_df, by=c("seq_id"="name.y")) %>% 
+  mutate(across(everything(), ~replace_na(.x,FALSE)))
+nTF<- data_TF %>% group_by(rep) %>%
+  summarise(across(where(is.logical), sum,  na.rm=T)) %>% 
+  pivot_longer(-rep) %>% filter(value>100) %>% add_count(name) %>% filter(n==2) %>% 
+  filter(!str_detect(name, "^H\\d"))
+data_TF= data_TF %>% 
   mutate(rep=as.factor(rep),across(where(is.logical), ~.x%>% factor(level=c("TRUE","FALSE"))))
-repname=unique(tidy_TF_data$rep)
+
+
 # TF Binding site activity association
-TF_data %>% group_by(rep, mean_sw) %>% summarise(NFYA=sum(TF_NFYA)/n()) %>% 
+data_TF %>% group_by(rep, mean_sw) %>% summarise(NFYA=sum(TF_NFYA)/n()) %>% 
   ggplot(aes(mean_sw %>% as.numeric(),NFYA))+geom_point(col="#14AFB2")+theme_bw()+
   geom_smooth(col="#216869")+theme(text=element_text(size=20))+
   facet_wrap(~rep)+ylim(0,1)+labs(x="Mean activity (binned by rank)",y="Proportion of promoters")+ggtitle("NFYA binding")
 
 ggsave("Plots/Fig2/NFYA_scatter.pdf", width = 9, height = 6.75, units="in")
 
-TF_data %>% group_by(rep, mean_sw) %>% summarise(SP1=sum(TF_SP1)/n()) %>% 
+data_TF %>% group_by(rep, mean_sw) %>% summarise(SP1=sum(TF_SP1)/n()) %>% 
   ggplot(aes(mean_sw %>% as.numeric(),SP1))+geom_point(col="#14AFB2")+
   geom_smooth(col="#216869")+theme_bw()+theme(text=element_text(size=20))+
   facet_wrap(~rep)+ylim(0,1)+labs(x="Mean activity (binned by rank)",y="Proportion of promoters")+ggtitle("SP1 binding")
 
 ggsave("Plots/Fig2/SP1_scatter.pdf", width = 9, height = 6.75, units="in")
 
-TF_data %>% group_by(rep, mean_sw) %>% summarise(SP2=sum(TF_SP2)/n()) %>% 
+data_TF %>% group_by(rep, mean_sw) %>% summarise(SP2=sum(TF_SP2)/n()) %>% 
   ggplot(aes(mean_sw %>% as.numeric(),SP2))+geom_point(col="#14AFB2")+
   geom_smooth(col="#216869")+theme_bw()+theme(text=element_text(size=20))+
   facet_wrap(~rep)+ylim(0,1)+labs(x="Mean activity (binned by rank)",y="Proportion of promoters")+ggtitle("SP2 binding")
@@ -904,17 +899,21 @@ TF_data %>% group_by(rep, mean_sw) %>% summarise(SP2=sum(TF_SP2)/n()) %>%
 ggsave("Plots/Fig2/SP2_scatter.pdf", width = 9, height = 6.75, units="in")
 
 # Whole Remap - activity analysis
-wilcox=map(tidy_TF_data %>% select(-mean, -mean_sw,-var_rank_sw, -rep),
-           ~coin::wilcox_test(formula=mean~.x|rep, data=tidy_TF_data) %>% pvalue())
+repname=unique(data_TF$rep)
+wilcox=map(data_TF %>% select(all_of(nTF$name)),
+           ~coin::wilcox_test(formula=mean~.x|rep, data=data_TF) %>% pvalue())
 wilcox=tibble(feature=names(wilcox), 
               pval=list_c(wilcox), 
               pval_corr=p.adjust(pval, "BH", length(wilcox)))
-wilcox_rep1=map(tidy_TF_data %>% 
+wilcox_rep1=map(data_TF %>% 
                   filter(rep==repname[1])%>%  
-                  select(-mean, -mean_sw,-var_rank_sw, -rep), 
+                  select(all_of(nTF$name)), 
                 ~coin::wilcox_test(formula=mean~.x, 
-                                   data=tidy_TF_data%>% filter(rep==repname[1]), conf.int=T))
-wilcox_rep2=map(tidy_TF_data %>% filter(rep==repname[2])%>%  select(-mean, -mean_sw,-var_rank_sw, -rep), ~coin::wilcox_test(formula=mean~.x, data=tidy_TF_data%>% filter(rep==repname[2]), conf.int=T))
+                                   data=data_TF%>% filter(rep==repname[1]), conf.int=T))
+wilcox_rep2=map(data_TF %>% filter(rep==repname[2]) %>%
+                  select(all_of(nTF$name)),
+                ~coin::wilcox_test(formula=mean~.x,
+                                   data=data_TF %>% filter(rep==repname[2]), conf.int=T))
 
 wilcox_df2=map2(list(wilcox_rep1, wilcox_rep2),repname,
                 ~tibble(feature=names(.x),estimate=map(.x,~confint(.x)$estimate) %>% list_c(), 
@@ -953,6 +952,7 @@ wilcox_df2 %>% filter(pval_corr<0.05)%>%
   scale_fill_manual(values=c("High activity"="#D6741F", "Low activity"="#7FB800"))
 ggsave("Plots/Fig2/remap_act_low.pdf", width = 9, height = 6.75, units="in")
 
+
 # GSEA Remap activity
 pregsea_act=function(df, rep){
   ids<-AnnotationDbi::select(hs, 
@@ -981,7 +981,6 @@ writexl::write_xlsx(list(Rep1=GSE_GO_rep1_df,Rep2=GSE_GO_rep2_df), "Analysis/Tab
 pol2_entrez=GSE_GO_rep1@geneSets[[GSE_GO_rep1$ID[1]]] 
 pol2_tf=pregsea[[1]]$feature[pregsea[[1]]$ENTREZID%in%pol2_entrez]
 p1=enrichplot::gseaplot2(GSE_GO_rep1, GSE_GO_rep1_df$ID[1], title=GSE_GO_rep1_df$Description[1], subplots = 1, color = "darkred")
-
 p2=wilcox_df2 %>% filter(pval_corr<0.05, rep=="Rep 1")%>% 
   mutate(act=ifelse(feature%in%paste0("TF_", pol2_tf), "set",
                     ifelse(sign(estimate)==1,"High activity", "Low activity"))) %>% 
@@ -1006,53 +1005,56 @@ ggsave("Plots/Fig2/GSEA_POL2.pdf", width = 9, height = 6.75, units="in" )
 vbles=tidy_TF_data  %>% select( -mean_sw, -var_rank_sw, -rep, -mean) %>% names()
 
 auc_l=list()
-for(j in unique(tidy_TF_data$rep)){
-  df=tidy_TF_data %>% filter(rep==j)
-  for(i in vbles){
-    auc_l[[j]][[i]]=pROC::roc(df[[i]],df[["var_rank_sw"]],ci=T, n.boots=1000, verbose=F, direction=">")
+for(j in unique(data_TF$rep)){
+  df=data_TF %>% filter(rep==j)
+  for(i in unique(nTF$name)){
+    auc_l[[j]][[i]]=pROC::roc(df[[i]],df[["var_rank_sw"]],ci=T, n.boots=1000, verbose=F, direction="<")
   }
 }
 auc_df=list()
 for (i in c(1,2)){
-  auc_df[[i]]=map(auc_l[[i]], ~tibble(rep=unique(tidy_TF_data$rep)[i], 
+  auc_df[[i]]=map(auc_l[[i]], ~tibble(rep=unique(data_TF$rep)[i], 
                                       ci2.5=(.x$ci %>% as.numeric)[1], 
                                       ci97.5=(.x$ci %>% as.numeric)[3],
                                       AUC=(.x$ci %>% as.numeric)[2])) %>% 
     list_rbind() %>% mutate(feature=names(auc_l[[1]]))
 }
 auc_df=list_rbind(auc_df)
+write_tsv(auc_df, "Analysis/Tables/AUC_remap.tsv")
 
 plot_auc2(auc_df)
-ggsave("Plots/Fig4/Remap_noise.pdf", width = 9, height = 6.75, units="in")
+
 
 ids<-AnnotationDbi::select(hs, 
-                           keys = (auc_df %>% filter(rep==rep) %>% mutate(feature=str_remove(feature,"TF_")))$feature,
+                           keys = (auc_df %>% filter(rep==rep))$feature,
                            columns = c("ENTREZID", "SYMBOL"),
                            keytype = "SYMBOL") %>% unique()
 
-pregsea_noise= auc_df %>%  
-  mutate(feature=str_remove(feature,"TF_")) %>% arrange(desc(AUC))%>% 
+
+pregsea_noise= auc_df  %>% 
+  arrange(desc(AUC))%>% 
   left_join(ids, by=c("feature"="SYMBOL"))%>% filter(!is.na(ENTREZID)) %>% 
   group_split(rep)
 ordered_noise=pregsea_noise[[1]]$AUC
 names(ordered_noise)=pregsea_noise[[1]]$ENTREZID
-GSE_GO_noise_rep1<-gseGO(ordered_noise, ont="CC", OrgDb = "org.Hs.eg.db")
+GSE_GO_noise_rep1<-gseGO(ordered_noise, ont="CC", OrgDb = "org.Hs.eg.db", pvalueCutoff = 0.1)
 GSE_GO_noise_rep1_df<-as.data.frame(GSE_GO_noise_rep1) %>% arrange(desc(NES))
 
 ordered_noise=pregsea_noise[[2]]$AUC
 names(ordered_noise)=pregsea_noise[[2]]$ENTREZID
-GSE_GO_noise_rep2<-gseGO(ordered_noise, ont="CC", OrgDb = "org.Hs.eg.db")
+GSE_GO_noise_rep2<-gseGO(ordered_noise, ont="CC", OrgDb = "org.Hs.eg.db", pvalueCutoff = 0.1)
 GSE_GO_noise_rep2_df<-as.data.frame(GSE_GO_noise_rep2) %>% arrange(desc(NES))
 
+writexl::write_xlsx(list(Rep1=GSE_GO_noise_rep1_df,Rep2=GSE_GO_noise_rep2_df), "Analysis/Tables/GSEA_noise_remap.xlsx")
 writexl::write_xlsx(list(Remap_activity_rep1=GSE_GO_rep1_df, Remap_activity_rep2=GSE_GO_rep2_df, Remap_noise_rep1=GSE_GO_noise_rep1_df, Remap_noise_rep2=GSE_GO_noise_rep2_df),"Analysis/Tables/GSEA_remap.xlsx")
 
-MLL1_entrez=GSE_GO_noise_rep1@geneSets[["GO:0071339"]] 
-MLL1_tf=pregsea_noise[[1]]$feature[pregsea_noise[[1]]$ENTREZID%in%MLL1_entrez]
 
-p1=enrichplot::gseaplot2(GSE_GO_noise_rep1, "GO:0071339", title="MLL1 complex", subplots = 1, color = "darkred")
-p2=auc_df %>% filter(rep=="Rep 1", ((AUC<0.5 & ci97.5<0.5)|(AUC>0.5 &ci2.5>0.5))) %>% 
-  mutate(act=ifelse(feature%in%paste0("TF_", MLL1_tf), "set",
-                                                                ifelse(AUC>0.5,"High noise", "Low noise"))) %>% 
+MLL1_entrez=GSE_GO_noise_rep2@geneSets[["GO:0071339"]] 
+MLL1_tf=pregsea_noise[[2]]$feature[pregsea_noise[[2]]$ENTREZID%in%MLL1_entrez]
+p1=enrichplot::gseaplot2(GSE_GO_noise_rep2, "GO:0071339", title="MLL1 complex", subplots = 1, color = "darkred")
+p2=auc_df %>% filter(rep=="Rep 2") %>% 
+  mutate(act=ifelse(feature%in%MLL1_tf, "set",
+                    ifelse(AUC>0.5,"High noise", "Low noise"))) %>% 
   arrange(desc(AUC)) %>% 
   ggplot(aes(x=AUC, y=fct_inorder(feature)))+
   geom_col(orientation="y", position="dodge", aes( fill=act, alpha=act))+
@@ -1065,7 +1067,7 @@ p2=auc_df %>% filter(rep=="Rep 1", ((AUC<0.5 & ci97.5<0.5)|(AUC>0.5 &ci2.5>0.5))
   scale_alpha_manual(values=c("High noise"=0.4, "Low noise"=0.4, "set"=1))+
   coord_flip()
 aplot::gglist(list(p1,p2), ncol = 1, heights = c(.75, 0.5))
-#ggsave("Plots/Fig4/GSEA_MLL1.pdf", width = 9, height = 6.75, units="in" )
+ggsave("Plots/Fig4/GSEA_MLL1.pdf", width = 9, height = 6.75, units="in" )
 
 # ChIP-Atlas 
 chipatlas=read_tsv("External_data/allPeaks_light.hg38.50_lib_unique.tsv", col_names = c("seq_id", "feature"))
