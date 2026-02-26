@@ -13,7 +13,7 @@ library(patchwork)
 library(ggnewscale)
 library(wCorr)
 theme_set(theme_bw())
-files=list.files("Data_processing/Count_table","counts_ampliconseq2023_.-..tsv", full.names = T)
+
 clrs=ghibli::ghibli_palette("PonyoMedium")[c(3,4,6,2,5,7,1)]
 clrs2=ghibli::ghibli_palette("PonyoLight")[c(3,4,6,2,5,7,1)]
 ```
@@ -22,11 +22,10 @@ clrs2=ghibli::ghibli_palette("PonyoLight")[c(3,4,6,2,5,7,1)]
 
 ### Quality Control
 
--   2 Replicates (1 and 3), sequenced separately.
+-   2 Replicates (1 and 2), sequenced separately.
 
--   6 samples each (Gates 2 to 7)
+-   6 samples each (Gates 1 to 6)
 
--   Ordered 25M reads per sample
 
 ```{r}
 QC=readODS::read_ods("Summary/QC_summary.ods", .name_repair = "universal")%>%filter(!is.na(id))
@@ -71,7 +70,7 @@ do
 done
 ```
 
-2- Change the name of the FASTQ files
+2- Change the name of the FASTQ files (this may not be necessary anymore)
 
 ```{bash}
 #| eval: false
@@ -170,6 +169,7 @@ for seq in $(cat seq_id.txt); do
 	echo -e "$seq\t$num_reads"
 	done > $output
 ```
+
 
 ```{r}
 #| label: fig-1
