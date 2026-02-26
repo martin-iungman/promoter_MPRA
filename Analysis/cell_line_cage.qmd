@@ -1,0 +1,219 @@
+---
+title: "Specific CAGE data"
+---
+
+```{r}
+#| code-summary: "settings"
+library(CAGEr)
+library(tidyverse)
+library(tidymodels)
+theme_set(theme_bw())
+lib=rtracklayer::import.bed("Library_data/res/library.bed")
+lib$gene_name=lib$name
+clrs=ghibli::ghibli_palette(name="PonyoMedium")
+clrs1=wesanderson::wes_palette(name="GrandBudapest1")
+clrs2=wesanderson::wes_palette(name="GrandBudapest2")
+```
+
+#### HEK
+
+### CAGE processing with CAGEr
+
+```{r}
+#| echo: true
+hek <- CAGEr::CAGEexp( genomeName     = "BSgenome.Hsapiens.UCSC.hg38"
+             , inputFiles     = "External_data/FANTOM5/hg38_cell_line/embryonic%20kidney%20cell%20line%3a%20HEK293%2fSLAM%20untreated.CNhs11046.10450-106F9.hg38.nobarcode.ctss.bed.gz"
+             , inputFilesType = "bedScore"
+             , sampleLabels   = "HEK")
+
+
+hek=CAGEr::getCTSS(hek)
+hek=annotateCTSS(hek, lib, upstream = 0, downstream = 252)
+```
+
+Normalization:
+
+```{r}
+plotReverseCumulatives(hek, fitInRange = c(5, 1000), onePlot = TRUE)
+
+```
+
+Clustering and Q90 for genomic width.
+
+```{r}
+hek <- CAGEr::normalizeTagCount(hek, method = "powerLaw", fitInRange = c(5, 1000), alpha = 1.18, T = 1E6)
+hek <- filterLowExpCTSS(hek, thresholdIsTpm = TRUE, nrPassThreshold = 1, threshold = 0.5)
+hek<-paraclu(hek, keepSingletonsAbove = 1, nrCores = 5)
+hek <- cumulativeCTSSdistribution(hek, clusters = "tagClusters", useMulticore = T)
+hek <- quantilePositions(hek, clusters = "tagClusters", qLow = 0.1, qUp = 0.9)
+#saveRDS(hek, "Tables/HEK_CAGEr.rds")
+```
+
+```{r}
+hek_df=tagClustersGR(hek,1,qLow = 0.1,qUp = 0.9)%>%plyranges::join_overlap_left_directed(lib,.)%>%as_tibble()
+write_tsv(hek_df, "Analysis/Tables/HEK_CAGEr_df.tsv")
+```
+
+#### HELA
+
+### CAGE processing with CAGEr
+
+```{r}
+#| echo: true
+files<-list.files("External_data/FANTOM5/hg38_cell_line/", pattern = "Hela", full.names = T)
+cell_line <- CAGEr::CAGEexp( genomeName     = "BSgenome.Hsapiens.UCSC.hg38"
+             , inputFiles     = files
+             , inputFilesType = "bedScore"
+             , sampleLabels   = paste0("Hela_", 1:3))
+
+
+cell_line=CAGEr::getCTSS(cell_line)
+plotCorrelation2( cell_line, samples = "all", tagCountThreshold = 1, applyThresholdBoth = FALSE, method = "pearson")
+cell_line <- mergeSamples(cell_line,  mergeIndex = rep(1,3),
+                   mergedSampleLabels = "Hela")
+cell_line=annotateCTSS(cell_line, lib, upstream = 0, downstream = 252)
+```
+
+Normalization:
+
+```{r}
+plotReverseCumulatives(cell_line, fitInRange = c(5, 1000))
+
+```
+
+Clustering and Q90 for genomic width.
+
+```{r}
+cell_line <- CAGEr::normalizeTagCount(cell_line, method = "powerLaw", fitInRange = c(5, 1000), alpha = 1.14, T = 1E6)
+cell_line <- filterLowExpCTSS(cell_line, thresholdIsTpm = TRUE, nrPassThreshold = 1, threshold = 0.5)
+cell_line<-paraclu(cell_line, keepSingletonsAbove = 1, nrCores = 5)
+cell_line <- cumulativeCTSSdistribution(cell_line, clusters = "tagClusters", useMulticore = T)
+cell_line <- quantilePositions(cell_line, clusters = "tagClusters", qLow = 0.1, qUp = 0.9)
+#saveRDS(hek, "Tables/HEK_CAGEr.rds")
+```
+
+```{r}
+to_df=tagClustersGR(cell_line,1,qLow = 0.1,qUp = 0.9)%>%plyranges::join_overlap_left_directed(lib,.)%>%as_tibble()
+write_tsv(to_df, "Analysis/Tables/Hela_CAGEr_df.tsv")
+```
+
+```{r}
+to_df=to_df %>% group_by(name) %>% summarise(hela_tpm=sum(hela_tpm , na.rm=T), hela_interq_width=sum(hela_interq_width))
+
+```
+
+```{r}
+data %>% left_join( to_df, by=c("seq_id"="name")) %>% mutate(mean_sw=as_factor(mean_sw)) %>% group_by(mean_sw, rep) %>% summarise(hela_tpm=mean(hela_tpm)) %>% ggplot(aes(mean_sw %>% as.numeric(), hela_tpm))+geom_point(col="#AD343E")+
+  geom_smooth(col="#216869", method="lm")+
+  facet_wrap(~rep)+labs(x="Mean activity (binned by rank)", y="Hela endogenous activity (mean TPM)")+theme_bw()+theme(text=element_text(size=20))+scale_y_log10()
+ggsave("Plots/Fig3/Hela_mean.pdf", width = 9, height = 6.75, units="in")
+
+data %>% left_join( to_df, by=c("seq_id"="name")) %>% mutate(hela_tpm=replace_na(hela_tpm,0))  %>% group_split(rep) %>% map(~cor(.x$mean,.x$hela_tpm, method="pearson" ))
+```
+
+```{r}
+data %>% left_join( to_df, by=c("seq_id"="name")) %>%
+  mutate(hela_tpm=replace_na(hela_tpm,0)) %>% 
+  group_by(rep) %>% 
+  mutate(mean_sw=row_number(mean) %>% cut_number(20) %>% as.numeric() %>% as_factor()) %>%
+  ggplot(aes(mean_sw, hela_tpm))+
+  geom_boxplot(fill="#AD343E", alpha=0.5)+
+  facet_wrap(~rep)+labs(x="Mean reporter activity (binned)", 
+                        y="Endogenous activity (TPM)")+
+  theme_bw()+
+  theme(text=element_text(size=20))+scale_y_log10()+
+  ggtitle("HeLa")
+ggsave("Plots/Fig3/hela_mean_boxplot.pdf", width = 9, height = 6.75, units="in")
+```
+
+## skeletal muscle
+
+```{r}
+set="tissue"
+cell_ont=readxl::read_xls(paste0("External_data/FANTOM5/",set,"_ontology_FANTOM5.xlsx")) %>% dplyr::rename("sample_id"=`Sample ID`)
+inputFiles = list.files(paste0("External_data/FANTOM5/hg38_",set), full.names = T,pattern=".nobarcode.ctss.bed.gz$")
+sample_id=inputFiles%>%str_extract("CNhs.{5}")
+cell_ont=tibble(filename=inputFiles, sample_id=sample_id)%>%inner_join(cell_ont, by=c("sample_id"))
+```
+
+```{r}
+lib$gene_name<-lib$name
+samples<-cell_ont %>% filter(`Facet ontology term`=="skeletal muscle tissue")
+
+cell_line <- CAGEr::CAGEexp( genomeName     = "BSgenome.Hsapiens.UCSC.hg38"
+             , inputFiles     = samples$filename
+             , inputFilesType = "bedScore"
+             , sampleLabels   = samples$sample_id)
+
+
+cell_line=CAGEr::getCTSS(cell_line)
+CAGEr::plotCorrelation2( cell_line, samples = "all", tagCountThreshold = 1, applyThresholdBoth = FALSE, method = "pearson")
+cell_line <- CAGEr::mergeSamples(cell_line,  mergeIndex = rep(1,nrow(samples)),
+                   mergedSampleLabels = "muscle")
+cell_line=CAGEr::annotateCTSS(cell_line, lib, upstream = 0, downstream = 252)
+```
+
+```{r}
+CAGEr::plotReverseCumulatives(cell_line, fitInRange = c(5, 100000))
+cell_line <- CAGEr::normalizeTagCount(cell_line, method = "powerLaw", fitInRange = c(5, 1000), alpha = 1.05, T = 1E6)
+cell_line <- CAGEr::filterLowExpCTSS(cell_line, thresholdIsTpm = TRUE, nrPassThreshold = 1, threshold = 0.5)
+cell_line<-CAGEr::paraclu(cell_line, keepSingletonsAbove = 1, nrCores = 5)
+cell_line <- CAGEr::cumulativeCTSSdistribution(cell_line, clusters = "tagClusters", useMulticore = T)
+cell_line <- CAGEr::quantilePositions(cell_line, clusters = "tagClusters", qLow = 0.1, qUp = 0.9)
+```
+
+```{r}
+to_df=CAGEr::tagClustersGR(cell_line,1,qLow = 0.1,qUp = 0.9)%>%plyranges::join_overlap_left_directed(lib,.)%>%as_tibble()
+write_tsv(to_df, "Analysis/Tables/skeletal_muscle_CAGEr_df.tsv")
+```
+
+```{r}
+to_df=to_df %>% group_by(name) %>% summarise(muscle_tpm=sum(score.y , na.rm=T), interq_width=sum(interquantile_width ))
+
+data %>% left_join( to_df, by=c("name")) %>% mutate(mean_sw=as_factor(mean_sw), muscle_tpm=replace_na(muscle_tpm,0)) %>% group_by(mean_sw, rep) %>% summarise(muscle_tpm=mean(muscle_tpm)) %>% ggplot(aes(mean_sw %>% as.numeric(), muscle_tpm))+geom_point(col="#AD343E")+
+  geom_smooth(col="#216869", method="lm")+
+  facet_wrap(~rep)+labs(x="Mean activity (binned by rank)", y="Skeletal muscle endogenous activity (mean TPM)")+theme_bw()+theme(text=element_text(size=20))+scale_y_log10()
+ggsave("Plots/Fig3/skeletal_muscle_mean.pdf", width = 9, height = 6.75, units="in")
+
+data %>% left_join( to_df, by=c("name")) %>% mutate(muscle_tpm=replace_na(muscle_tpm,0))  %>% group_split(rep) %>% map(~cor(.x$mean,.x$muscle_tpm, method="spearman" ))
+data %>% left_join( to_df, by=c("name")) %>% mutate(muscle_tpm=replace_na(muscle_tpm,0))  %>% group_split(rep) %>% map(~cor.test(.x$mean,.x$muscle_tpm, method="spearman" , exact=T))
+```
+
+```{r}
+data %>% left_join( to_df, by=c("name")) %>%
+  mutate(muscle_tpm=replace_na(muscle_tpm,0)) %>% 
+  group_by(rep) %>% 
+  mutate(mean_sw=row_number(mean) %>% cut_width(250) %>% as.numeric() %>% as_factor()) %>%
+  ggplot(aes(mean_sw, muscle_tpm))+
+  geom_boxplot(fill="#AD343E", alpha=0.5)+
+  facet_wrap(~rep)+labs(x="Mean reporter activity (binned)", 
+                        y="Endogenous activity (TPM)")+
+  theme_bw()+
+  theme(text=element_text(size=20))+scale_y_log10()+
+  ggtitle("Skeletal muscle")
+ggsave("Plots/Fig3/skeletal_muscle_mean_boxplot.pdf", width = 9, height = 6.75, units="in")
+
+```
+
+```{r}
+data %>% left_join( to_df, by=c("name")) %>%
+  filter(!is.na(gini_tissue)) %>% 
+  mutate(sample_specificity_gini=cut_number(gini_tissue, n=3) %>% as.numeric() %>% as_factor(),
+         sample_specificity_gini=ifelse(sample_specificity_gini==1, "Housekeeping", 
+                                               ifelse(sample_specificity_gini==2, "Intermediate", "Tissue-specific"))) %>% 
+  filter(sample_specificity_gini!="Intermediate") %>% 
+  mutate(muscle_tpm=replace_na(muscle_tpm,0)) %>% 
+  group_by(rep, sample_specificity_gini) %>% 
+  mutate(mean_sw=row_number(mean) %>% cut_number(15) %>% as.numeric() %>% as_factor()) %>%
+  ggplot(aes(mean_sw, muscle_tpm+.1, fill=sample_specificity_gini))+
+  geom_boxplot( alpha=0.5, outliers = F)+
+  facet_wrap(~rep)+
+  labs(x="Mean reporter activity (binned)", 
+                        y="Endogenous activity (TPM)", fill="")+
+  theme_bw()+
+  theme(text=element_text(size=20))+scale_y_log10()+
+  ggtitle("Skeletal muscle")+
+  scale_fill_manual(values=c("Housekeeping"="#1B8C8E", "Tissue-specific"="#0D2C54"))#+theme(legend.position = "none")
+ggsave("Plots/Fig3/skeletal_muscle_mean_boxplot_by_tissue_sp.pdf", width = 9, height = 6.75, units="in")
+
+```
