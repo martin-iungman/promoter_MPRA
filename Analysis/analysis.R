@@ -322,7 +322,7 @@ tidy_data=data %>% fastDummies::dummy_cols("TE_superclass", ignore_na = T, omit_
          `Narrow promoters`=shape_class==1,
          `Broad promoters`=shape_class==3,
          `High activity in HEK293`=hek_tpm>median(data$hek_tpm[data$hek_tpm>0]),
-         `None Cis Regulatory Module`=N_TF_CRM==0,
+         `None Cis Regulatory Module`=!crm,
          `High chromatin accesibility (DNase-seq)`=(cut_number(mean_dnase, n=3) %>% as.numeric())==3,
          across(starts_with("enh"), ~.x>0)
   ) %>%
@@ -1117,7 +1117,7 @@ ggsave("Plots/Fig2/chipatlas_noise.pdf", width = 9, height = 6.75, units="in")
 
 ### Alternative promoters (poner en otro script como armo df sample_activity)
 
-epd<- rtracklayer::import.bed("External_data/EPD/human38_epdnew.bed") %>% 
+epd<- rtracklayer::import.bed("External_data/human38_epdnew.bed") %>% 
   IRanges::promoters(downstream=16, upstream = 236) #full EPD database
 lib<- rtracklayer::import.bed("Library_data/res/library.bed")
 lib$name<- str_remove(lib$name, "^FP.{6}_")
