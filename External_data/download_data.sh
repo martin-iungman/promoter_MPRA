@@ -39,6 +39,11 @@ wget -O External_data/dudnyk2024_sup.zip https://www.science.org/doi/suppl/10.11
 
 #remap
 wget https://remap.univ-amu.fr/storage/remap2022/hg38/MACS2/remap2022_nr_macs2_hg38_v1_0.bed.gz | gzip -d
+wget https://remap.univ-amu.fr/storage/remap2022/hg38/MACS2/remap2022_crm_macs2_hg38_v1_0.bed.gz | gzip -d
 
 #EPD
 wget -O External_data/human38_epdnew.bed https://epd.expasy.org/ftp/epdnew/H_sapiens/current/Hs_EPDnew.bed
+wget -O External_data/EPD_hg19.bed https://epd.expasy.org/ftp/epdnew/H_sapiens/006/Hs_EPDnew_006_hg19.bed
+
+#DNase
+wget https://www.encodeproject.org/files/ENCFF165GHP/@@download/ENCFF165GHP.bigWig
