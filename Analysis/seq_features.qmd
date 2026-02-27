@@ -1,0 +1,367 @@
+---
+title: "Promoter features"
+author: "Martin Iungman"
+---
+
+Last update: `r Sys.Date()`
+
+```{r}
+#| code-summary: Settings
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(rtracklayer)
+library(tidyverse)
+library(furrr)
+library(patchwork)
+library(ggnewscale)
+theme_set(theme_bw())
+clrs=ghibli::ghibli_palette(name="PonyoMedium")
+clrs1=wesanderson::wes_palette(name="GrandBudapest1")
+clrs2=wesanderson::wes_palette(name="GrandBudapest2")
+```
+
+```{r}
+lib=rtracklayer::import.bed("Library_data/res/library.bed")
+dna<-getSeq(Hsapiens,lib)
+values(lib)=tibble(seq_id=lib$name)
+seq_data=read_tsv("Library_data/res/seq_data.tsv")
+prom_df=seq_data%>%filter(seq_id%in%lib$seq_id)
+```
+
+### G+C content
+
+```{r}
+G_C=Biostrings::oligonucleotideFrequency(dna,width=1, as.prob = T)[,c("C","G")]%>%rowSums()
+lib$g_c=round(G_C,3)
+prom_df<-elementMetadata(lib)%>%as_tibble()%>%dplyr::select(seq_id,g_c)%>%left_join(prom_df,.)
+```
+
+```{r}
+p1=prom_df%>%ggplot(aes(g_c))+geom_density(fill=clrs[3])+xlab("[G+C]")
+p2=prom_df%>%ggplot(aes(g_c, col=type))+geom_density()+scale_color_manual(values=clrs[c(2,4,6)])+xlab("G+C (%)")
+p1+p2
+```
+
+### CpG
+
+```{r}
+CpG=Biostrings::oligonucleotideFrequency(dna,width=2)[,c("CG","GC")]
+lib$CpG=round(rowSums(CpG)/width(lib),3)
+prom_df<-elementMetadata(lib)%>%as_tibble()%>%select(seq_id,CpG)%>%left_join(prom_df,.)
+```
+
+```{r}
+p1=prom_df%>%ggplot(aes(CpG))+geom_density(fill=clrs[3])
+p2=prom_df%>%ggplot(aes(CpG, col=type))+geom_density()+scale_color_manual(values=clrs[c(2,4,6)])+xlab("CpG (%)")
+p1+p2
+```
+
+### Observed vs Expected CpG
+
+```{r}
+prom_df=Biostrings::oligonucleotideFrequency(dna, width=1)[, c("C", "G")] %>% as_tibble() %>% mutate(seq_id=lib$seq_id, exp_cpg=(C*G)/(width(dna)^2)) %>% select(-c(C,G)) %>% left_join(prom_df, ., by="seq_id")
+
+ggplot(prom_df, aes(CpG/exp_cpg))+geom_density()
+```
+
+### CpG Islands
+
+Downloaded from UCSC
+
+```{bash}
+#| eval: false
+#| code-summary: Download GCI
+wget -qO- http://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/cpgIslandExt.txt.gz    | gunzip -c    | awk 'BEGIN{ OFS="\t"; }{ print $2, $3, $4, $5$6, $7, $8, $9, $10, $11, $12 }'   > External_data/cpgIslandExt.hg38.bed
+
+```
+
+```{r}
+cgi_df=read_tsv("External_data/cpgIslandExt.hg38.bed", col_names = c("seqname", "start","end", "cgi_name", "length", "cpgNum","gcNum","perCpG", "perGC", "obsExp")) 
+cgi_lib=GRanges(cgi_df)
+print(paste("There are",sum(countOverlaps( cgi_lib, lib)>1),"CGI that overlap more than one promoter"))
+cgi_lib=plyranges::join_overlap_left(cgi_lib,lib)
+cgi_lib_inner=plyranges::join_overlap_intersect(lib,cgi_lib)
+cgi_lib_inner$width_cgi_overlap=width(cgi_lib_inner)
+prom_df=prom_df %>% left_join(as_tibble(cgi_lib_inner) %>% select(seq_id, width_cgi_overlap)) %>% mutate(width_cgi_overlap=replace_na(width_cgi_overlap,0)) %>% group_by(seq_id) %>% mutate(width_cgi_overlap=sum(width_cgi_overlap)) %>% unique() %>% mutate(CGI=width_cgi_overlap>100)
+```
+
+```{r}
+ggplot()+geom_density(data=as_tibble(cgi_lib), aes(length, col="All CGI"))+geom_density(data=as_tibble(cgi_lib_inner), mapping=aes(x=length, col="Library overlapping CGI"))+scale_x_log10()+xlab("CGI length (min 200pb)")+labs(legend="")+scale_color_manual(values = c("All CGI"=clrs[2], "Library overlapping CGI"=clrs[3]))
+```
+
+```{r}
+ggplot(prom_df)+geom_density(aes(width_cgi_overlap), fill=clrs[3])+xlab("CGI-promoter overlap (pb)")
+```
+
+### EPD features
+
+Just for EPD promoters: TATA-box, INR and CCAAT
+
+Download [EPD](https://epd.epfl.ch/EPDnew_select.php) subsets and find which promoter names are in the library.
+
+
+```{r}
+tata_epd=import.bed("External_data/EPD/human38_epd_TATA.bed")
+prom_df=prom_df%>%
+  mutate(TATA_EPD=ifelse(type=="promoter",ifelse(name%in%tata_epd$name, T,F),NA))
+
+inr_epd=import.bed("External_data/EPD/human38_epd_INR.bed")
+prom_df=prom_df%>%mutate(INR_EPD=ifelse(type=="promoter",ifelse(name%in%inr_epd$name, T,F),NA))
+
+ccaat_epd=import.bed("External_data/EPD/human38_epd_CCAAT.bed")
+prom_df=prom_df%>%mutate(CCAAT_EPD=ifelse(type=="promoter",ifelse(name%in%ccaat_epd$name, T,F),NA))
+
+gc_epd=rtracklayer::import.bed("External_data/EPD/human38_epd_GCbox.bed")
+prom_df=prom_df%>%mutate(GCbox_EPD=ifelse(type=="promoter",ifelse(name%in%gc_epd$name, T,F),NA))
+
+```
+
+### TSS motif
+
+```{r}
+tss_seq=lib%>% subset(width==252) %>% getSeq(Hsapiens,.) %>% as.character() %>% str_extract(".{18}$") %>% str_extract("^.{5}")
+tss_df=tibble(seq_id=(lib%>% subset(width==252))$seq_id, 
+              TSS_seq=tss_seq, 
+              INR_strong_TSS=str_detect(TSS_seq, "(T|C)CA(G|C)(T|A)"), 
+              TCT_TSS=str_detect(TSS_seq, ".(T|C)(C|G)(T|C)(C|T)"), 
+              CA_TSS=str_detect(TSS_seq, ".CA.."), 
+              CG_TSS=str_detect(TSS_seq, ".CG.."), 
+              TA_TSS=str_detect(TSS_seq, ".TA.."), 
+              TG_TSS=str_detect(TSS_seq, ".TG.."),
+              GC_TSS=str_detect(TSS_seq, ".GC.."),
+              PyPu_TSS=str_detect(TSS_seq, ".(C|T)(A|G).."),
+              other_TSS=INR_strong_TSS+TCT_TSS+CA_TSS+CG_TSS+TA_TSS+TG_TSS==0)
+
+```
+
+### PhyloP score
+
+```{bash}
+eval: false
+multiBigwigSummary BED-file -b External_data/hg38.phyloP100way.bw -o hg38.phyloP100way_summary_lib.npz --BED Labo/splicing_noise/Library_data/res/library.bed --outRawCounts ~/Documents/Labo/splicing_noise/External_data/hg38.phyloP100way_summary_lib.bed
+
+multiBigwigSummary BED-file -b External_data/hg38.phyloP100way.bw -o hg38.phyloP100way_summary_lib_1bp.npz --BED Labo/splicing_noise/Library_data/res/1bp_library.bed --outRawCounts ~/Documents/Labo/splicing_noise/External_data/hg38.phyloP100way_summary_lib_1bp.bed
+```
+
+```{r}
+phylo100=import.bed("External_data/hg38.phyloP100way_summary_lib.bed")%>%sort()
+lib=sort(lib)
+lib$phylo100=as.numeric(phylo100$name)%>%round(4)
+prom_df=left_join(prom_df, as_tibble(values(lib)))
+
+```
+
+```{r}
+phylo1pb=rtracklayer::import.bed("External_data/hg38.phyloP100way_summary_lib_1bp.bed")
+phylo1pb$score=phylo1pb$name
+phylo1pb$name=NULL
+phylo1pb=plyranges::join_overlap_inner(phylo1pb, lib)
+phylo1pb_prom=subset(phylo1pb, str_detect(seq_id, "^FP.{6}_"))
+lib_df=as_tibble(lib)
+names(lib_df)=paste0(names(lib_df), "_seq")
+values(phylo1pb_prom)=left_join(as_tibble(values(phylo1pb_prom)), lib_df, by=c("seq_id"="seq_id_seq"))
+strand(phylo1pb_prom)=phylo1pb_prom$strand_seq
+phylo1pb_prom$seq=getSeq(Hsapiens,phylo1pb_prom)
+phylo1pb_prom_df=unique(as_tibble(phylo1pb_prom)) %>% mutate(relpos=ifelse(strand_seq=="-", abs(start_seq-start), abs(start-end_seq)), score=as.numeric(score))
+ordered_names_phylo=phylo1pb_prom_df%>% group_by(seq_id) %>% summarise(med_score=median(score)) %>% arrange(med_score)
+phylo1pb_prom_df %>% write_tsv("Analysis/Tables/phylo100_1pb_lib.tsv")
+```
+
+```{r}
+range_sum_phylo=phylo1pb_prom_df %>% mutate(range=ifelse((relpos-16)<=50, "close", ifelse((relpos-16)<=150, "intermediate", "far"))) %>% group_by(seq_id, range) %>% summarise(mean_range_phylo100=mean(score, na.rm=T))
+prom_df=range_sum_phylo %>% pivot_wider(values_from = mean_range_phylo100, names_from = range, names_prefix = "phylop100_") %>% left_join(prom_df,., by=c("seq_id"))
+```
+
+### Human-Mouse turnover functional conservation (Young 2015)
+
+```{r}
+
+epd_hg19=import.bed("External_data/EPD_hg19.bed")
+young=read_tsv("External_data/Sup1_mouse_human_Young2015.txt", skip=2, col_names = c("seqnames", "start", "end", "human_pos", "mouse_pos", "turnover"))
+young$strand=str_extract(young$human_pos, ".$")
+hg19_young_lib=epd_hg19 %>% subset(name%in%prom_df$name) %>% plyranges::join_overlap_left_directed(GRanges(young))
+na_proms=subset(hg19_young_lib, is.na(turnover))
+extra_proms=epd_hg19 %>% subset(name%in%na_proms$name ) %>% promoters(upstream = 235, downstream = 16)%>% plyranges::join_overlap_left_directed(GRanges(young)) %>% subset(!is.na(turnover)) %>% values() %>% as_tibble() %>% select(-human_pos, -mouse_pos) %>% unique() %>%add_count(name) %>% filter(n==1) %>% select(-n, -score)
+values(hg19_young_lib) %>% as_tibble() %>% filter(!is.na(turnover)) %>% select(-human_pos, -mouse_pos, -score) %>% bind_rows(extra_proms)->turnover_df
+
+prom_df=prom_df %>% left_join(turnover_df)
+
+ggplot(prom_df %>% filter(type=="promoter", !is.na(turnover)), aes(turnover %>% fct_infreq()))+geom_histogram(stat="count")+xlab("Human-Mouse functional conservation")
+```
+
+### Repeated Elements
+
+```{r}
+repeatmasker=read_delim("External_data/repeatMasker_hg38.txt", col_names = T,  delim = " ") 
+repeatmasker_gr=GRanges(repeatmasker) %>% plyranges::join_overlap_intersect(lib, .) %>% subset(width>10)
+
+dna_repeat<-getSeq(Hsapiens,repeatmasker_gr)
+G_C_repeat=Biostrings::oligonucleotideFrequency(dna_repeat,width=1, as.prob = T)[,c("C","G")]%>%rowSums()
+repeatmasker_gr$G_C_repeat=round(G_C_repeat,3)
+repeatmasker_df=repeatmasker_gr %>% as_tibble() %>% mutate(repeat_family=ifelse(repeat_class%in%c("Low_complexity", "Simple_repeat"), "LCR", "TE"), repeat_superclass=str_remove(repeat_class, "/.+$")) %>% dplyr::rename(repeat_overlap=width)
+
+```
+
+```{r}
+LCR_df<-dplyr::filter(repeatmasker_df, repeat_family=="LCR") %>% select(seq_id,repeat_overlap,G_C_repeat, repeat_family) %>% group_by(seq_id)%>% summarise(LCR_overlap=sum(repeat_overlap), G_C_LCR=sum(G_C_repeat*repeat_overlap)/LCR_overlap)
+TE_df<-dplyr::filter(repeatmasker_df, repeat_family=="TE") %>% select(seq_id,repeat_overlap,G_C_repeat, repeat_family, repeat_superclass) %>% group_by(seq_id)%>% summarise(TE_overlap=sum(repeat_overlap), G_C_TE=sum(G_C_repeat*repeat_overlap)/TE_overlap, TE_superclass=unique(repeat_superclass)[[1]]) 
+
+
+prom_df=prom_df %>% left_join(LCR_df) %>% left_join(TE_df)%>% mutate(across(c(LCR_overlap,TE_overlap,G_C_TE,G_C_LCR),function(x)replace_na(x, 0)), TE_superclass=TE_superclass %>% fct_lump_min(100))
+```
+
+### Cis Regulatory Modules (CRM) (from ChIP-seq)
+
+```{r}
+crm=import.bed("External_data/remap2022_crm_macs2_hg38_v1_0.bed")
+crm_lib=plyranges::join_overlap_inner(lib, crm)
+
+prom_df=prom_df %>% mutate(crm=seq_id%in%crm_lib$name.x)
+
+```
+
+### Enhancers
+
+```{r}
+enhancers=import.bed("External_data/F5.hg38.enhancers.bed")
+width(enhancers) %>% as_tibble() %>% ggplot(aes(value))+geom_density()+scale_x_log10()
+lib10kb=promoters(lib, upstream=5000, downstream=5000)
+lib50kb=promoters(lib, upstream=25000, downstream=25000)
+lib100kb=promoters(lib, upstream=50000, downstream=50000)
+
+lib$enh10kb=countOverlaps(lib10kb, enhancers)
+lib$enh50kb=countOverlaps(lib50kb, enhancers)
+lib$enh100kb=countOverlaps(lib100kb, enhancers)
+values(lib) %>% as_tibble() %>% pivot_longer(starts_with("enh"), names_to = "range") %>% ggplot(aes(value, fill=range))+geom_bar(stat = "count", position = "dodge")
+
+prom_df=left_join(prom_df, values(lib) %>% as_tibble())
+
+```
+
+### Chromatin accessibility (DNase)
+
+```{r}
+dnasa=rtracklayer::import.bw("External_data/ENCFF165GHP_DNase.bigWig", as = "GRanges")
+lib2=lib
+strand(lib2) <- "*"
+seqlevels(lib2)->seqlevels(dnasa)
+ol=plyranges::find_overlaps( dnasa, lib2)
+long_dnase=as_tibble(ol) %>% select(-strand) %>% left_join(as_tibble(lib) %>% select(seq_id, strand), by="seq_id") %>% filter(str_detect(seq_id, "^FP")) %>% 
+  group_by(seq_id) %>% mutate(range_order=((ifelse(strand=="-", row_number(-start), row_number(start))-1)*25), rel_score=score/sum(score))
+wide_dnase=long_dnase %>% select(seq_id, range_order, score) %>% group_by(seq_id) %>% mutate(mean_dnase=mean(score)) %>% pivot_wider(names_from = range_order, values_from = score, names_prefix = "dnase_") %>% select(-dnase_275)
+prom_df=left_join(prom_df, wide_dnase)
+
+```
+
+
+### PUFFIN prediction
+
+##### Reprocessed
+
+```{r}
+df_pred=read_tsv("Analysis/Tables/Dudnyk_puffin_prediction_summ.tsv")
+prom_df=left_join(prom_df, df_pred, by="seq_id")
+```
+
+##### Preprocessed (selectivity)
+
+```{r}
+epd=import.bed("External_data/EPD/human38_epdnew.bed")
+selectivity_puffin=readxl::read_xlsx("External_data/dudnyk2024_sup.xlsx", sheet=5, skip = 1) %>% dplyr::rename(start=TSS, selectivity_dudnik=`Selectivity (Puffin-D)`, motif_selectivity_dudnik=`Motif Selectivity`, dispersion_tissue_dudnik=`Dispersion index (log10)`,mean_expr_log10_dudnik=`Mean expression (log10)`)%>% select(-geneID, -geneName) %>% unique()
+selectivity_puffin$end=selectivity_puffin$start
+gr_selectivity_puffin=GRanges(selectivity_puffin)
+selectivity_puffin_lib=plyranges::join_overlap_intersect_directed(promoters(epd, upstream=10,downstream =10), gr_selectivity_puffin)  %>% values() %>% as_tibble() %>% add_count(name) %>% filter(n==1) %>% select(-c(n,score))
+prom_df=left_join(prom_df, selectivity_puffin_lib, by="name")
+```
+
+### Endogenous HEK293 activity
+
+```{r}
+hek_df=read_tsv("Analysis/Tables/HEK_CAGEr_df.tsv")
+hek_df=hek_df %>% group_by(name) %>% summarise(hek_tpm=sum(score.y, na.rm=T))
+prom_df=left_join(prom_df, hek_df, by=c("seq_id"="name"))
+```
+
+### Tissue Specificity
+
+#### Classification (discrete)
+
+sample_specific = Mas de 10TPM en alguna muestra, hasta en 10 muestras activo (1TPM)
+
+Group_enrichment= En 7 muestras o menos se acumula el 50% de la actividad total
+
+sample_enhanced= alguna muestra con 4 veces mas actividad que el promedio de los activos
+
+all_samples_detected=ninguna de las anteriores, mas de 1 TPM en el 80% o + de las muestras
+
+Mixed= el resto
+
+```{r}
+sample_activity=read_tsv("Analysis/Tables/sample_CAGE_activity.tsv")
+sample_activity_lib=sample_activity %>% filter(name%in%prom_df$name)
+n_samples=unique(sample_activity_lib$sample) %>% length()
+obj=sample_activity_lib %>% mutate(tpm=counts*1E6/libsize) %>% group_by(name) %>% mutate(sample_enrichment=tpm/(sum(tpm)-tpm), active=tpm>1, n_detected=sum(active), sample_enhancement=tpm/(sum(tpm)/n_detected)) %>% ungroup() 
+#sample_specific=obj %>% filter(tpm>10, n_detected<10)
+enrichment=obj %>%         
+  group_by(name) %>% arrange(name, desc(tpm)) %>% 
+  mutate(i=row_number(), group_enrichment=cumsum(tpm)/(sum(tpm)-cumsum(tpm))) %>% 
+  filter(active, group_enrichment>1, i<=(0.1*n_samples)) %>% filter(i==min(i)) %>% 
+  mutate(sample_specificity_class="group_enrichment")
+
+enhanced=obj %>% filter(sample_enhancement>=4, active==T)
+class_long=obj %>% 
+  mutate(sample_specificity_class=ifelse(name %in% (enrichment$name[enrichment$sample_specificity_class=="group_enrichment"]), "group_enrichment",
+                                              ifelse(n_detected==0, "non_detected",
+                                                     ifelse(name%in%enhanced$name, "sample_enhanced",
+                                                            ifelse(n_detected>0.8*n_samples, "all_samples_detected", "mixed")))))
+
+class_short=class_long %>% select(name, sample_specificity_class, n_detected) %>% unique()
+
+prom_df=left_join(prom_df, class_short %>% rename(active_fantom5_samples=n_detected), by="name")
+
+class_short %>% ggplot(aes(sample_specificity_class %>% fct_infreq()))+geom_bar()+xlab("Activity distribution")
+enrichment %>% filter(sample_specificity_class=="group_enrichment") %>% ggplot(aes(sample %>% fct_infreq() %>% fct_lump_prop(0.01)))+geom_bar()+xlab("Tissue expressing")+ylab("Count of sample-specific promoters")+theme(axis.text.x=element_text(angle=90))
+enhanced %>% filter(name %in% class_short$name[class_short$sample_specificity_class=="sample_enhanced"]) %>% ggplot(aes(sample %>% fct_infreq() %>% fct_lump_prop(0.01)))+geom_bar()+xlab("Tissue expressing")+ylab("Count of sample-enhanced promoters")+theme(axis.text.x=element_text(angle=90))
+
+class_long %>% filter(name=="FDXACB1_1") %>% arrange(desc(tpm))%>% ggplot(aes(sample %>% fct_inorder(), tpm))+geom_col()+geom_hline(yintercept=1)+ggtitle("Example promoter")+xlab("Sample")
+```
+
+#### Numeric (Gini)
+
+```{r}
+gini <- function(x, weights=rep(1,length=length(x))){
+  ox <- order(x)
+  x <- x[ox]
+  weights <- weights[ox]/sum(weights)
+  p <- cumsum(weights)
+  nu <- cumsum(weights*x)
+  n <- length(nu)
+  nu <- nu / nu[n]
+  sum(nu[-1]*p[-n]) - sum(nu[-n]*p[-1])
+}
+
+gini_values=obj %>% filter(n_detected>0) %>% group_by(name) %>%  summarise(sample_specificity_gini=gini(tpm), sum_tpm_fantom5=sum(tpm))
+```
+
+```{r}
+inner_join(class_short, gini_values) %>% mutate(iq=cut_number(sample_specificity_gini, n=3)) %>% group_by(iq) %>% mutate(iq=max(sample_specificity_gini, na.rm = T)) %>% ggplot(aes(n_detected, sample_specificity_gini, col=sample_specificity_class))+geom_point()+geom_hline(aes(yintercept=iq))+labs(y="Gini value", x="Samples detected", col="")
+```
+
+```{r}
+prom_df=left_join(prom_df,gini_values, by="name")
+```
+
+
+### Promoter shape
+
+```{r}
+shape<- read_tsv("Analysis/Tables/shape_merged.tsv")
+shape=shape %>% group_by(name) %>% filter(dominant_ctss.score==max(dominant_ctss.score))
+shape %>% ggplot(aes(interquantile_width))+geom_density()+geom_vline(xintercept = 25)
+shape<- shape %>% mutate(shape_class=ifelse(interquantile_width>25, "Broad", "Narrow"))  %>% select(name, shape_class, interquantile_width) %>% rename(seq_id=name, shape=interquantile_width)%>% distinct(seq_id, .keep_all = T)
+prom_df<-left_join(prom_df, shape, by="seq_id")
+```
+
+```{r}
+prom_df %>% write_tsv("Analysis/Tables/prom_df.tsv")
+```
+
