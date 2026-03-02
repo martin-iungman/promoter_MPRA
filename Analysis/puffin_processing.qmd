@@ -1,0 +1,83 @@
+---
+title: "PUFFIN processing"
+---
+
+**Dataset preparation:**
+
+I will add the known upstream and downstream sequences. Than includes the primers and LoxP, and part of the CDS for dsRed/EGFP. As 325pb are needed in each side, and to be independent from the genomic context of the insertion, I will complete with random sequences. Every promoter will have the same 5 random sequences upstream the LoxP.
+
+```{r}
+n_random_seq=5
+up="gtacatcaagtgtatcactagcgtttaaacttaagcttccatggattacaaggatgacgatgacaagggggtacctgccccaaaaaaaaaacgcaaagtggaggacccagtaccaggatctagaggtaggtgatcctcctgctgctttggttcagggttttgcttgaggggggggggtggtgatttccttgccatgggcagactgagcagaaaaggccattgggaccatgttctgaatgcctccacctcaaccaccggccggtaggaccaaagccaccccgtgttttctcaggatctcttttcccagggagatccctcggcccaa"
+down="ATAACTTCGTATAGCATACATTATACGAAGTTATATGGATCCATACTAGgacattgattattg" %>% tolower()
+random=sample(c("A", "C","G","T"),size=325-nchar(down), replace=T) %>% paste0(collapse="")
+fasta=readLines("Library_data/data/promoters_wo_dupl.fa")
+ids=fasta[grep("^>", fasta)]
+seqs=fasta[-grep("^>", fasta)]
+for(i in 1:n_random_seq){
+  random=sample(c("A", "C","G","T"),size=325-nchar(down), replace=T) %>% paste0(collapse="")
+  for(j in 1:length(seqs)){
+    id_=paste0(ids[j],"_random",i)
+    id_ %>% cat(file="puffin/library_puffin.fa", append=T, sep="\n")
+    paste0(random, down, seqs[j], up) %>% cat(file="puffin/library_puffin.fa", append=T,sep="\n")
+  }
+}
+```
+
+**Analysis**
+
+The script puffin.py was modified to write all the outputs in folder pred
+
+```{bash}
+cd puffin
+mkdir pred
+mkdir pred/processed
+python puffin.py sequence puffin/library_puffin.fa
+```
+
+**Processing.**
+
+The "replicates" with different upstream random sequences will be summarized by the mean for every variable in every position. This new dataframe will be written in the folder processed.
+
+I also calculate some statistics for each promoter:
+
+-   The prediction score in the position=16 (the TSS as set by EPD)
+
+-   The mean prediction score in the window 6 to 26, (-10 to 10 from TSS)
+
+-   The relative position and value of the maximum prediction score in the sequence
+
+As there are too many files (\~24000\*5), they are processed in chunks of FILE_BINS ids at a time and in parallel.
+
+```{r}
+process_sample=function(id){
+  if(!is.na(id)){
+  id=str_replace(id,"\\+", "_") %>% str_replace(">", "_")
+  files=paste0("puffin/pred/", id, "_random", 1:5, ".csv")
+  #files=list.files("puffin/pred", pattern=id, full.names = T) 
+  obj=map(files, ~read_csv(.x, show_col_types = FALSE)%>% t() %>% as_tibble()) %>% keep(~nrow(.x)>0) 
+  if(length(obj)!=5){print(paste("WARNING:", id, "with only", length(obj), "elements"))}
+  for (i in 1:length(obj)){
+    names(obj[[i]])=obj[[i]][1,]
+    obj[[i]]=obj[[i]][-1,] %>% mutate(across(-Sequence, as.numeric))
+  }
+  obj=obj %>%list_rbind() %>%  group_by(Coordinate) %>% summarise(across(where(is.numeric), median), sd_prediction=sd(Prediction),Sequence=unique(Sequence), rep_random=length(obj))  %>% ungroup() %>% mutate(seq_id=id) 
+  write_csv(obj, paste0("puffin/pred/processed/", id, ".csv"))
+  return(obj)}
+}
+
+
+df_pred=data.frame()
+FILE_BINS=200
+plan(multisession, workers=10)
+for(i in 0:(length(ids)/FILE_BINS)){ # como son demasiados archivos para abrir juntos, los separo en paquetes de FILE_BINS ids (multiplicado por n_random_seq para la cantidad de archivos)
+  print(c("starting ID", i*FILE_BINS))
+  m=future_map(ids[(i*FILE_BINS+1):((i+1)*FILE_BINS)] %>% str_remove("^>"),process_sample) #cargo, ordeno la data, resumo las "replicas" y guardo archivo
+  g1=m %>% list_rbind()%>% group_by(seq_id) %>% filter(Prediction==max(Prediction)) %>% rename(max_score_pred_puffin=Prediction, pos_max_score_pred_puffin=Coordinate) %>% select(seq_id, max_score_pred_puffin, pos_max_score_pred_puffin)
+  g2=m %>% list_rbind() %>% filter(Coordinate==252-16)%>% rename(teoTSS_score_pred_puffin=Prediction, teoTSS_inr_eff=`Sum of initiator effect`, teoTSS_motif_eff=`Sum of motif effect`, teoTSS_trinucl_eff=`Sum of trinucleotide effect`) %>% select(teoTSS_score_pred_puffin,teoTSS_inr_eff,teoTSS_motif_eff, teoTSS_trinucl_eff, seq_id)
+  g3=m %>% list_rbind() %>% filter(Coordinate>252-26,Coordinate<252-6) %>%  group_by(seq_id) %>% summarise(TSS20_mean_score_pred_puffin=mean(Prediction))
+  df_pred=rbind(df_pred, full_join(g2,g1) %>% full_join(g3))
+} 
+write_tsv(df_pred, "Analysis/Tables/Dudnyk_puffin_prediction_summ.tsv")
+prom_df=left_join(prom_df, df_pred, by="seq_id")
+```

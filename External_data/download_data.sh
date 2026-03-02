@@ -36,6 +36,7 @@ join -1 10 -2 1 -t $'\t' allPeaks_light.hg38.50_lib_sorted.bed experimentList_ch
 
 #PUFFIN 
 wget -O External_data/dudnyk2024_sup.zip https://www.science.org/doi/suppl/10.1126/science.adj0116/suppl_file/science.adj0116_tables_s1_to_s8.zip | gzip -d
+#follow https://github.com/jzhoulab/puffin instruction to download PUFFIN script correctly
 
 #remap
 wget https://remap.univ-amu.fr/storage/remap2022/hg38/MACS2/remap2022_nr_macs2_hg38_v1_0.bed.gz | gzip -d
